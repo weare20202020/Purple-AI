@@ -5,3 +5,5 @@ data/
 *.log
 .DS_Store
 Thumbs.db
+
+DOCS_V1.5.md
