@@ -166,7 +166,7 @@ interface LLMProvider {
 **当前生效配置**（自动检测自 OpenCode）：
 ```
 provider: deepseek
-apiKey:   sk-6482280d89b54ddca7928e16272d054b
+apiKey:   sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 baseURL:  https://api.deepseek.com
 model:    gpt-4o (保持 default.json 中的设置)
 ```
@@ -299,7 +299,7 @@ Agent 的 system prompt 包含：
 ### 9.3 API 密钥
 
 ```
-DeepSeek API Key: sk-6482280d89b54ddca7928e16272d054b
+DeepSeek API Key: sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 Base URL:         https://api.deepseek.com
 来源:             C:\Users\weare20202020\.config\opencode\opencode.json
                  (provider → DeepSeek → options → apiKey)
