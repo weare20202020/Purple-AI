@@ -1,0 +1,8 @@
+{
+  "llm": {
+    "provider": "openai",
+    "apiKey": "",
+    "model": "gpt-4o"
+  },
+  "defaultAgent": "A"
+}

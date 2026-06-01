@@ -1,0 +1,5 @@
+[
+  { "id": "A", "name": "Alice",  "role": "lead",       "port": 3000, "expertise": ["planning", "coordination"] },
+  { "id": "B", "name": "Bob",    "role": "researcher",  "port": 3001, "expertise": ["research", "data-analysis"] },
+  { "id": "C", "name": "Carol",  "role": "engineer",   "port": 3002, "expertise": ["coding", "architecture"] }
+]
