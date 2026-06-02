@@ -56,7 +56,7 @@
 | 🧠 **多 Agent 协作** | 每个 Agent 有独立身份、角色、HTTP 端口，对等通信 |
 | 📨 **A2A 消息驱动** | Agent 间通过 HTTP POST 异步收发，Inbox 持久化防丢失 |
 | 🔌 **多 LLM 后端** | OpenAI / DeepSeek / Anthropic（Claude），原生 function calling |
-| 🧩 **工具系统** | 文件读写、编辑、搜索、命令行执行 —— 内置 7 个工具 |
+| 🧩 **工具系统** | 文件读写、编辑、搜索、命令行执行 —— 内置 6 个工具 |
 | 🧬 **技能系统** | `send_message` 等技能让 Agent 间互派任务 |
 | 📝 **持久记忆** | 经验卡片自动生成，关键词检索，跨 session 复用 |
 | 📂 **页面索引** | 启动时扫描项目文件，自动注入相关上下文 |
@@ -106,6 +106,7 @@ npm run build && npm start
 | `/index` | 重建文件索引 |
 | `/help` | 显示所有命令 |
 | `/quit` | 退出 |
+| `/exit` | 退出（同 `/quit`）|
 
 ---
 
@@ -183,6 +184,8 @@ Purple-AI/
 ├── 📋 *.md              # 文档（根层）
 └── 📁 app/
     ├── src/
+    │   ├── index.ts      # 入口
+    │   ├── types.ts      # 核心类型
     │   ├── agent/        # AgentRuntime + Manager + Spawner
     │   ├── cli/          # Commander CLI 入口
     │   ├── config/       # 配置加载
