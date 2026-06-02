@@ -1,4 +1,4 @@
-import type { AgentProfile, Message } from '../types.js'
+import type { AgentProfile, Message, LogEntry } from '../types.js'
 import { loadAgents } from '../config/loader.js'
 import { Inbox } from '../message/inbox.js'
 import { MessageServer } from '../network/server.js'
@@ -34,6 +34,26 @@ function repairHistory(history: LLMMessage[]): LLMMessage[] {
       return { role: 'user' as const, content: `[Tool result]: ${m.content ?? ''}` }
     }
     return m
+  })
+}
+
+function parseResponse(text: string): ToolCall[] | null {
+  const regex = /\[\[(\w+)\s*(\{.*?\})\]\]/gs
+  const matches = [...text.matchAll(regex)]
+  if (matches.length === 0) return null
+  return matches.map(m => {
+    let args = m[2]
+    try {
+      const parsed = JSON.parse(args)
+      args = JSON.stringify(parsed)
+    } catch {
+      // keep raw
+    }
+    return {
+      id: `call_${randomUUID().slice(0, 8)}`,
+      name: m[1],
+      arguments: args,
+    }
   })
 }
 
@@ -80,6 +100,8 @@ export class AgentRuntime {
   reflectionModel?: string // separate model for reflection, defaults to llmModel
   private conversationHistory: LLMMessage[] = []
   private workingAgents: Set<string> = new Set()
+  private _thinking = false
+  get isThinking(): boolean { return this._thinking }
   private dataDir: string
   private totalTokens = 0
   private processingInbox = false
@@ -91,6 +113,7 @@ export class AgentRuntime {
   manager: { switchAgent: (id: string) => Promise<unknown>; startAgent: (id: string) => Promise<AgentRuntime>; getAgent: (id: string) => AgentRuntime | undefined; getActiveId: () => string } | null = null
   onOutput?: (text: string) => void
   onWorkingUpdate?: (agents: string[]) => void
+  onLog?: (entry: LogEntry) => void
 
   get contextLength(): number {
     return this.conversationHistory.length
@@ -145,7 +168,7 @@ export class AgentRuntime {
     await this.loadSession()
     await this.server.listen(this.profile.port)
     // drain any unprocessed messages from previous run
-    this.drainInbox()
+    await this.drainInbox()
     // build page index on startup
     try {
       const age = pageIndexAge()
@@ -155,9 +178,15 @@ export class AgentRuntime {
     } catch { /* non-critical */ }
   }
 
+  private drainRequested = false
+
   private async drainInbox(): Promise<void> {
-    if (this.processingInbox) return
+    if (this.processingInbox) {
+      this.drainRequested = true
+      return
+    }
     this.processingInbox = true
+    this.drainRequested = false
     try {
       while (this.inbox.length > 0) {
         const msg = await this.inbox.pull()
@@ -169,6 +198,9 @@ export class AgentRuntime {
     } finally {
       this.processingInbox = false
       this.updateWorkingStatus()
+      if (this.drainRequested) {
+        this.drainInbox()
+      }
     }
   }
 
@@ -191,6 +223,11 @@ export class AgentRuntime {
   private async _processUserInput(input: string): Promise<string> {
     const isFirst = this.conversationHistory.length === 0
     this.addToHistory({ role: 'user', content: input })
+    this.onLog?.({
+      type: 'agent_message',
+      timestamp: Date.now(),
+      data: { from: 'user', to: this.profile.id, content: input, io: 'in' },
+    })
     if (isFirst) {
       this.sessionName = this.generateSessionName(input)
       if (!this.sessionId) this.sessionId = randomUUID()
@@ -198,16 +235,32 @@ export class AgentRuntime {
 
     for (let step = 0; step < this.maxReActSteps; step++) {
       const response = await this.callLLM()
+
+      if (!response.toolCalls || response.toolCalls.length === 0) {
+        const parsed = parseResponse(response.content ?? '')
+        if (parsed && parsed.length > 0) {
+          response.toolCalls = parsed
+          response.content = (response.content ?? '').replace(/\[\[\w+\s*\{.*?\}\]\]/gs, '').trim() || null
+        }
+      }
+
       this.addToHistory({
         role: 'assistant',
         content: response.content,
+        reasoning_content: response.reasoning_content,
         tool_calls: response.toolCalls,
       })
 
       if (!response.toolCalls || response.toolCalls.length === 0) {
         await this.saveSession()
         await this.saveExperienceCard(input, response.content ?? '')
-        return response.content?.trim() ? response.content : '[Done]'
+        const text = response.content?.trim() ? response.content : '[Done]'
+        this.onLog?.({
+          type: 'agent_message',
+          timestamp: Date.now(),
+          data: { from: this.profile.id, to: 'user', content: text, io: 'out' },
+        })
+        return text
       }
 
       for (const tc of response.toolCalls) {
@@ -269,6 +322,11 @@ Keep your reflection concise (2-3 paragraphs). Focus on practical adjustments.` 
 
   async processIncomingMessage(msg: Message): Promise<void> {
     const senderName = this.getAgentName(msg.from)
+    this.onLog?.({
+      type: 'agent_message',
+      timestamp: Date.now(),
+      data: { from: msg.from, to: this.profile.id, fromName: senderName, content: msg.content, io: 'in' },
+    })
     const inject: LLMMessage = {
       role: 'user',
       content: `[From ${senderName} (${msg.from}) via team message]\nType: ${msg.type}\n${msg.content}`,
@@ -277,15 +335,25 @@ Keep your reflection concise (2-3 paragraphs). Focus on practical adjustments.` 
 
     for (let step = 0; step < this.maxReActSteps; step++) {
       const response = await this.callLLM()
+
+      if (!response.toolCalls || response.toolCalls.length === 0) {
+        const parsed = parseResponse(response.content ?? '')
+        if (parsed && parsed.length > 0) {
+          response.toolCalls = parsed
+          response.content = (response.content ?? '').replace(/\[\[\w+\s*\{.*?\}\]\]/gs, '').trim() || null
+        }
+      }
+
       this.addToHistory({
         role: 'assistant',
         content: response.content,
+        reasoning_content: response.reasoning_content,
         tool_calls: response.toolCalls,
       })
 
       if (!response.toolCalls || response.toolCalls.length === 0) {
         await this.saveSession()
-        this.workingAgents.delete(msg.from)
+        this.onTaskCompleted(msg.from)
 
         if (msg.from && msg.type === 'task') {
           const target = loadAgents().find(a => a.id === msg.from)
@@ -299,6 +367,11 @@ Keep your reflection concise (2-3 paragraphs). Focus on practical adjustments.` 
               type: 'result',
               content: text,
             }
+            this.onLog?.({
+              type: 'agent_message',
+              timestamp: Date.now(),
+              data: { from: this.profile.id, to: msg.from, toName: senderName, content: text, io: 'out' },
+            })
             await networkSend(target.port, reply)
           }
         }
@@ -331,16 +404,26 @@ Keep your reflection concise (2-3 paragraphs). Focus on practical adjustments.` 
     }
 
     await this.saveSession()
-    this.workingAgents.delete(msg.from)
+    this.onTaskCompleted(msg.from)
     this.onOutput?.('[Reached max reasoning steps]')
   }
 
   onTaskSent(agentId: string): void {
     this.workingAgents.add(agentId)
+    this.emitWorkingUpdate()
   }
 
   onTaskCompleted(agentId: string): void {
     this.workingAgents.delete(agentId)
+    this.emitWorkingUpdate()
+  }
+
+  getWorkingAgents(): string[] {
+    return Array.from(this.workingAgents)
+  }
+
+  private emitWorkingUpdate(): void {
+    this.onWorkingUpdate?.(Array.from(this.workingAgents))
   }
 
   private updateWorkingStatus(): void {
@@ -359,28 +442,6 @@ Keep your reflection concise (2-3 paragraphs). Focus on practical adjustments.` 
       ? 'None'
       : coworkers.map(c => `- ${c.name} (${c.id}): ${c.role}, expertise: ${c.expertise.join(', ')}`).join('\n')
 
-    const tools = getAllTools()
-    const toolList = tools.map(t => {
-      const shape = t.schema._def?.shape ?? {}
-      const params = Object.entries(shape).map(([k, v]: [string, any]) => {
-        const opt = v.isOptional?.() ? '?' : ''
-        const type = v._def?.type ?? v.constructor.name?.replace('Zod', '').toLowerCase() ?? 'string'
-        return `  ${k}${opt}: ${type}`
-      }).join('\n')
-      return `- ${t.name}: ${t.description}\n${params}`
-    }).join('\n\n')
-
-    const skills = getAllSkills()
-    const skillList = skills.map(s => {
-      const shape = s.schema._def?.shape ?? {}
-      const params = Object.entries(shape).map(([k, v]: [string, any]) => {
-        const opt = v.isOptional?.() ? '?' : ''
-        const type = v._def?.type ?? v.constructor.name?.replace('Zod', '').toLowerCase() ?? 'string'
-        return `  ${k}${opt}: ${type}`
-      }).join('\n')
-      return `- ${s.name}: ${s.description}\n${params}`
-    }).join('\n\n')
-
     const pageEntries = await loadPageIndex()
     const pageIndexBlock = pageEntries.length > 0
       ? '\n\nProject files:\n' + formatPageIndexShort(pageEntries, 25)
@@ -398,16 +459,10 @@ Keep your reflection concise (2-3 paragraphs). Focus on practical adjustments.` 
 
     return `You are ${this.profile.name}, a ${this.profile.role} with expertise in ${this.profile.expertise.join(', ')}.
 
-IMPORTANT: You are running in a real agent harness. ALL tools listed below are real and functional. You CAN read files, write files, edit files, run commands, and send messages to other agents. When the user asks about your capabilities, describe the tools you have access to. Do NOT say you can't do something — if a tool exists for it, you can do it.
+IMPORTANT: You are running in a real agent harness. You have access to tools for reading, writing, editing files, running commands, and sending messages to other agents. When the user asks about your capabilities, describe the tools you can use. Do NOT say you can't do something — if a tool exists for it, you can do it.
 
 Your team members:
-${coworkerList}
-
-Available tools:
-${toolList || 'None'}
-
-Available skills (for team coordination):
-${skillList || 'None'}${pageIndexBlock}${experienceBlock}
+${coworkerList}${pageIndexBlock}${experienceBlock}
 Rules:
 1. You work in a team of AI agents. You can delegate tasks to colleagues using the send_message tool.
 2. Messages from the user appear as normal "user" messages.
@@ -458,24 +513,34 @@ You can call multiple tools in a single step when they are independent. After to
         return m
       }),
     ]
+    this._thinking = true
     try {
       return await provider.generate(messages, this.llmApiKey, this.llmModel,
         tools.length > 0 ? tools : undefined)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
       return { content: `[LLM API error: ${msg}]` }
+    } finally {
+      this._thinking = false
     }
   }
 
   private addToHistory(msg: {
     role: 'user' | 'assistant' | 'tool' | 'system'
     content?: string | null
+    reasoning_content?: string | null
     tool_calls?: ToolCall[]
     tool_call_id?: string
   }): void {
+    // OpenAI/DeepSeek reject assistant content:null when no tool_calls
+    let content = msg.content ?? null
+    if (msg.role === 'assistant' && content === null && (!msg.tool_calls || msg.tool_calls.length === 0)) {
+      content = ''
+    }
     const entry: LLMMessage = {
       role: msg.role,
-      content: msg.content ?? null,
+      content,
+      reasoning_content: msg.reasoning_content,
       tool_calls: msg.tool_calls,
       tool_call_id: msg.tool_call_id,
     }
@@ -511,7 +576,7 @@ You can call multiple tools in a single step when they are independent. After to
       const content = m.content ?? (m.tool_calls ? `[Tool calls: ${m.tool_calls.map(tc => tc.name).join(', ')}]` : '')
       return `[${m.role}] ${content}`
     }).join('\n\n')
-    const recent = msgs.slice(half)
+    const recent = msgs.slice(splitIdx)
 
     const summary = await this.callLLMForSummary(toSummarize)
     if (!summary) return
@@ -736,8 +801,11 @@ You can call multiple tools in a single step when they are independent. After to
     const tool = getTool(name)
     if (!tool) return `[Unknown tool: ${name}]`
     const ctx: ToolContext = { workspace: this.workspace, runtime: this }
+    this.onLog?.({ type: 'tool_call', timestamp: Date.now(), data: { name, params } })
     try {
-      return await tool.execute(params, ctx)
+      const result = await tool.execute(params, ctx)
+      this.onLog?.({ type: 'tool_result', timestamp: Date.now(), data: { name, result: result.slice(0, 200) } })
+      return result
     } catch (e: any) {
       return `[Tool error: ${e.message}]`
     }
@@ -754,6 +822,11 @@ You can call multiple tools in a single step when they are independent. After to
     }
     try {
       const result = await skill.execute(parsed.data, ctx)
+      // emit send_delivered log for successful send_message
+      if (name === 'send_message' && typeof result === 'object' && result !== null && 'success' in result && result.success) {
+        const targetName = loadAgents().find(a => a.id === params.to)?.name ?? String(params.to)
+        this.onLog?.({ type: 'send_delivered', timestamp: Date.now(), data: { to: params.to, toName: targetName, content: String(params.content ?? '') } })
+      }
       return JSON.stringify(result)
     } catch (e: any) {
       return `[Skill error: ${e.message}]`

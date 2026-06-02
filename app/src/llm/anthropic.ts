@@ -47,20 +47,22 @@ export class AnthropicProvider implements LLMProvider {
         role: 'user',
         content: [{
           type: 'tool_result',
-          tool_use_id: msg.tool_call_id!,
+          tool_use_id: msg.tool_call_id ?? '',
           content: msg.content ?? '',
         }],
       }
     }
     if (msg.role === 'assistant' && msg.tool_calls?.length) {
-      return {
-        role: 'assistant',
-        content: msg.tool_calls.map(tc => {
-          let input: any = {}
-          try { input = JSON.parse(tc.arguments) } catch { input = { _raw: tc.arguments } }
-          return { type: 'tool_use', id: tc.id, name: tc.name, input }
-        }),
+      const content: any[] = []
+      if (msg.content) {
+        content.push({ type: 'text', text: msg.content })
       }
+      for (const tc of msg.tool_calls) {
+        let input: any = {}
+        try { input = JSON.parse(tc.arguments) } catch { input = { _raw: tc.arguments } }
+        content.push({ type: 'tool_use', id: tc.id, name: tc.name, input })
+      }
+      return { role: 'assistant', content }
     }
     // user / assistant with text
     return { role: msg.role, content: msg.content ?? '' }

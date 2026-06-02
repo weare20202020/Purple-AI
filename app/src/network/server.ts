@@ -3,18 +3,18 @@ import type { Message } from '../types.js'
 
 export class MessageServer {
   private server
-  private onMessage: (msg: Message) => void
+  private onMessage: (msg: Message) => Promise<void>
 
-  constructor(port: number, onMessage: (msg: Message) => void) {
+  constructor(port: number, onMessage: (msg: Message) => Promise<void>) {
     this.onMessage = onMessage
     this.server = createServer((req: IncomingMessage, res: ServerResponse) => {
       if (req.method === 'POST' && req.url === '/receive') {
         let body = ''
         req.on('data', (chunk: string) => { body += chunk })
-        req.on('end', () => {
+        req.on('end', async () => {
           try {
             const msg: Message = JSON.parse(body)
-            this.onMessage(msg)
+            await this.onMessage(msg)
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ status: 'ok' }))
           } catch {

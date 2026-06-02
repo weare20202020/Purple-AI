@@ -3,6 +3,9 @@ import { render, Box, Text, useApp, useStdout, useInput } from 'ink'
 import TextInput from 'ink-text-input'
 import type { AgentManager } from '../agent/manager.js'
 import { BANNER } from './banner.js'
+import { getState, updateState } from './store.js'
+import { setCommitFn, markDirty } from './scheduler.js'
+import type { UIState } from './store.js'
 
 const DEEP     = '#7B4FB5'
 const GRADIENT = ['#6B3FA0','#7B4FB5','#8B5FC8','#9E70D6','#B283E3','#C499EE']
@@ -24,12 +27,6 @@ const ALL_COMMANDS = [
   { cmd: '/quit',               desc: 'Exit' },
 ]
 
-interface ChatMessage {
-  id: number
-  sender: string
-  text: string
-}
-
 export function renderApp(manager: AgentManager): Promise<unknown> {
   const { waitUntilExit } = render(<PurpleApp manager={manager} />)
   return waitUntilExit()
@@ -38,16 +35,25 @@ export function renderApp(manager: AgentManager): Promise<unknown> {
 let msgId = 0
 
 function PurpleApp({ manager }: { manager: AgentManager }) {
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [snapshot, setSnapshot] = useState<UIState>(() => {
+    const ids = manager.getWorkingAgentIds()
+    const u = manager.getContextUsage()
+    updateState({ workingIds: ids, usage: u, sessName: manager.getSessionName() })
+    return getState()
+  })
   const [input, setInput] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [usage, setUsage] = useState(manager.getContextUsage())
-  const [sessName, setSessName] = useState(manager.getSessionName())
   const [suggestionIndex, setSuggestionIndex] = useState(-1)
   const { exit } = useApp()
   const { stdout } = useStdout()
   const agent = manager.getActiveRuntime()!
   const W = (stdout.columns ?? 78) - 2
+
+  const { messages, loading, workingIds, usage, sessName } = snapshot
+
+  useEffect(() => {
+    setCommitFn(() => setSnapshot(() => getState()))
+    return () => setCommitFn(() => {})
+  }, [])
 
   const filteredCommands = useMemo(() => {
     if (!input.startsWith('/')) return []
@@ -64,10 +70,32 @@ function PurpleApp({ manager }: { manager: AgentManager }) {
   useEffect(() => {
     manager.setOutputCallback((agentId, text) => {
       if (agentId === manager.getActiveId()) {
-        setMessages(prev => [...prev, { id: ++msgId, sender: agentId, text }])
-        setUsage(manager.getContextUsage())
-        setSessName(manager.getSessionName())
+        updateState({
+          messages: [...getState().messages, { id: ++msgId, sender: agentId, text }],
+          usage: manager.getContextUsage(),
+          sessName: manager.getSessionName(),
+        })
+        markDirty()
       }
+    })
+  }, [manager])
+
+  useEffect(() => {
+    manager.setLogCallback((agentId, entry) => {
+      if (agentId === manager.getActiveId() && entry.type === 'send_delivered') {
+        const toName = String(entry.data.toName ?? entry.data.to ?? '?')
+        updateState({
+          messages: [...getState().messages, { id: ++msgId, sender: '✓', text: `${toName} 已确认收到消息` }],
+        })
+        markDirty()
+      }
+    })
+  }, [manager])
+
+  useEffect(() => {
+    manager.setOnWorkingUpdate((ids) => {
+      updateState({ workingIds: ids })
+      markDirty()
     })
   }, [manager])
 
@@ -100,24 +128,34 @@ function PurpleApp({ manager }: { manager: AgentManager }) {
     const trimmed = value.trim()
     if (!trimmed || loading) return
     setInput('')
-    setLoading(true)
+    updateState({ loading: true })
+    markDirty()
 
     if (trimmed.startsWith('/')) {
       await handleCommand(trimmed)
-      setLoading(false)
+      updateState({ loading: false })
+      markDirty()
       return
     }
 
-    setMessages(prev => [...prev, { id: ++msgId, sender: '你', text: trimmed }])
+    updateState({ messages: [...getState().messages, { id: ++msgId, sender: '你', text: trimmed }] })
+    markDirty()
     try {
       const response = await agent.processUserInput(trimmed)
-      setMessages(prev => [...prev, { id: ++msgId, sender: agent.profile.name, text: response }])
-      setUsage(manager.getContextUsage())
-      setSessName(manager.getSessionName())
+      updateState({
+        messages: [...getState().messages, { id: ++msgId, sender: agent.profile.name, text: response }],
+        usage: manager.getContextUsage(),
+        sessName: manager.getSessionName(),
+        loading: false,
+      })
+      markDirty()
     } catch (e: any) {
-      setMessages(prev => [...prev, { id: ++msgId, sender: '!', text: e.message ?? String(e) }])
+      updateState({
+        messages: [...getState().messages, { id: ++msgId, sender: '!', text: e.message ?? String(e) }],
+        loading: false,
+      })
+      markDirty()
     }
-    setLoading(false)
   }
 
   const handleCommand = async (cmd: string) => {
@@ -158,7 +196,8 @@ function PurpleApp({ manager }: { manager: AgentManager }) {
           try {
             const rt = await manager.createAgent(agentName, agentRole, expertise.length > 0 ? expertise : [agentRole])
             push(`Created and started agent "${rt.profile.name}" (${rt.profile.id}) on port ${rt.profile.port}`)
-            setUsage(manager.getContextUsage())
+            updateState({ usage: manager.getContextUsage() })
+            markDirty()
           } catch (e: any) { push(`Error: ${e.message}`) }
           return
         }
@@ -166,8 +205,8 @@ function PurpleApp({ manager }: { manager: AgentManager }) {
         await manager.createNewSession()
         const rt = manager.getActiveRuntime()
         push(`New session started — ${rt?.profile.name} is ready.`)
-        setUsage(manager.getContextUsage())
-        setSessName(manager.getSessionName())
+        updateState({ usage: manager.getContextUsage(), sessName: manager.getSessionName() })
+        markDirty()
         return
       }
 
@@ -189,8 +228,8 @@ function PurpleApp({ manager }: { manager: AgentManager }) {
           if (!exists) { push(`Session not found: ${arg}`); return }
           await manager.switchToSession(targetId)
           push(`Switched to session "${exists.name}"`)
-          setUsage(manager.getContextUsage())
-          setSessName(manager.getSessionName())
+          updateState({ usage: manager.getContextUsage(), sessName: manager.getSessionName() })
+          markDirty()
         }
         return
       }
@@ -237,21 +276,41 @@ function PurpleApp({ manager }: { manager: AgentManager }) {
     }
   }
 
-  const push = (text: string) => setMessages(prev => [...prev, { id: ++msgId, sender: '', text }])
+  const push = (text: string) => {
+    updateState({ messages: [...getState().messages, { id: ++msgId, sender: '', text }] })
+    markDirty()
+  }
 
   const rt = manager.getActiveRuntime()!
   const agentName = rt.profile.name
 
   const Sep = () => <Text color={DEEP}>{'─'.repeat(W)}</Text>
 
-  const StatusLine = () => (
-    <Text>
-      <Text color={DEEP}>● </Text>
-      <Text color={TEXT}>{manager.providerName}</Text>
-      <Text color={DEEP}> │ </Text>
-      <Text color={TEXT}>█ {usage.pct}%</Text>
-    </Text>
-  )
+  const StatusLine = () => {
+    const allStatus = manager.getAllStatus()
+    const working = new Set(workingIds)
+    const parts: React.ReactNode[] = []
+    for (const s of allStatus) {
+      if (parts.length > 0) parts.push(<Text>  </Text>)
+      const isWorking = s.running && working.has(s.id)
+      const marker = !s.running ? '○'
+        : isWorking ? '◌'
+        : '●'
+      const color = isWorking ? LIGHT : DEEP
+      parts.push(<Text><Text color={color}>{marker}</Text> <Text color={TEXT}>{s.name}</Text></Text>)
+    }
+    const rt = manager.getActiveRuntime()
+    const thinking = rt?.isThinking ? <Text><Text color={LIGHT}> ◌ 思考中</Text></Text> : null
+    return (
+      <Text>
+        {parts}{thinking}
+        <Text color={DEEP}>  │  </Text>
+        <Text color={TEXT}>{manager.providerName}</Text>
+        <Text color={DEEP}>  │  </Text>
+        <Text color={TEXT}>█ {usage.pct}%</Text>
+      </Text>
+    )
+  }
 
   const StartupPanel = () => (
     <Box borderStyle="round" borderColor={DEEP} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1} flexDirection="column" alignItems="center" width={stdout.columns - 2}>
@@ -313,9 +372,10 @@ function PurpleApp({ manager }: { manager: AgentManager }) {
       <Box flexGrow={1} flexDirection="column" paddingLeft={1} paddingRight={1}>
         {messages.map((msg) => {
           const isUser = msg.sender === '你'
-          const isAgent = msg.sender && msg.sender !== '你'
-          const borderClr = isUser ? LIGHT : DEEP
-          const label = isUser ? 'User' : msg.sender
+          const isAgent = msg.sender && msg.sender !== '你' && msg.sender !== '✓'
+          const isSystem = msg.sender === '✓'
+          const borderClr = isUser ? LIGHT : isSystem ? DIM : DEEP
+          const label = isUser ? 'User' : isSystem ? '系统' : msg.sender
 
           return (
             <Box key={msg.id} flexDirection="column" marginTop={1}>
@@ -323,7 +383,7 @@ function PurpleApp({ manager }: { manager: AgentManager }) {
                 <Text color={TEXT}>
                   <Text bold color={borderClr}>{label}</Text>
                   <Text>: </Text>
-                  <Text color={TEXT}>{msg.text}</Text>
+                  <Text color={isSystem ? DIM : TEXT}>{msg.text}</Text>
                 </Text>
               </Box>
             </Box>

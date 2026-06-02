@@ -1,0 +1,776 @@
+好，现在我基本懂你的系统了。
+
+我按你要求：
+
+**不继续分析。直接给可落地方案。**
+
+目标：
+
+> Purple AI
+> Windows优先
+> Ink保留
+> 中量改动
+> 未来 10~20 Agent / Async A2A / 24h 稳定
+
+---
+
+# 最终方案（我建议你直接做）
+
+## Phase 1（必须做，先解决当前病）
+
+工程量：**≈150~250 行**
+
+目的：
+
+**立刻解决：**
+
+* 自动上滚
+* 框选失效
+* cursor漂移
+* Windows console 污染
+
+---
+
+## 1）统一 stdout Ownership（最重要）
+
+你现在最大问题不是 Ink。
+
+是：
+
+**Classic + Ink 同时写 stdout。**
+
+必须改。
+
+---
+
+### 新增
+
+`src/runtime/output-gate.ts`
+
+职责：
+
+**全项目唯一 stdout 出口。**
+
+---
+
+接口：
+
+```ts
+class OutputGate {
+
+    mode:'ink'|'classic'
+
+    write(text:string)
+
+    log(text:string)
+
+    setMode(mode)
+}
+```
+
+---
+
+规则：
+
+### Ink模式
+
+禁止：
+
+```ts
+console.log()
+process.stdout.write()
+```
+
+全部 mute。
+
+只允许：
+
+```txt
+Ink renderer
+```
+
+写。
+
+---
+
+### Classic模式
+
+允许：
+
+```txt
+OutputGate.write()
+```
+
+统一输出。
+
+---
+
+---
+
+改动：
+
+### classic.ts
+
+替换：
+
+```ts
+console.log(...)
+process.stdout.write(...)
+```
+
+↓
+
+```ts
+outputGate.write(...)
+```
+
+---
+
+### 全局 patch
+
+启动时：
+
+```ts
+const rawLog=console.log
+
+console.log=(...args)=>{
+
+    outputGate.log(args.join(' '))
+}
+```
+
+---
+
+结果：
+
+**stdout 单写者。**
+
+这是当前最关键修复。
+
+---
+
+---
+
+## 2）UI Scheduler（必须）
+
+新增：
+
+`src/ui/scheduler.ts`
+
+---
+
+职责：
+
+**合并事件风暴。**
+
+---
+
+实现。
+
+不要复杂。
+
+100 行以内。
+
+---
+
+```ts
+let pending=false
+
+const FRAME_MS=100
+
+export function schedule(commit){
+
+    if(pending) return
+
+    pending=true
+
+    setTimeout(()=>{
+
+        pending=false
+        commit()
+
+    },FRAME_MS)
+}
+```
+
+---
+
+---
+
+### app.tsx 改法
+
+现在：
+
+6条路径直接 setState。
+
+全部删。
+
+---
+
+改成：
+
+```ts
+enqueueUIUpdate(patch)
+```
+
+---
+
+例如。
+
+---
+
+#### spinner
+
+现在：
+
+```ts
+setSpinnerTick(...)
+setWorkingIds(...)
+```
+
+↓
+
+改：
+
+```ts
+scheduler.enqueue({
+
+    spinnerTick:next,
+    workingIds:newIds
+})
+```
+
+---
+
+#### output callback
+
+现在：
+
+```ts
+setMessages(...)
+```
+
+↓
+
+改：
+
+```ts
+scheduler.enqueue({
+    messages:[
+        ...store.messages,
+        msg
+    ]
+})
+```
+
+---
+
+#### log callback
+
+同理。
+
+---
+
+---
+
+最后。
+
+scheduler 每100ms：
+
+```txt
+merge all pending updates
+↓
+single setState(snapshot)
+```
+
+---
+
+结果。
+
+从：
+
+```txt
+6 independent setState paths
+```
+
+变：
+
+```txt
+1 commit path
+```
+
+---
+
+未来10 agent也能扛。
+
+---
+
+---
+
+## 3）Store Snapshot（必须）
+
+新增：
+
+`src/ui/store.ts`
+
+轻量。
+
+---
+
+不要 Redux。
+
+不要 Zustand。
+
+---
+
+50行够。
+
+---
+
+```ts
+let state:UIState
+
+get()
+
+update(partial)
+
+subscribe(fn)
+```
+
+---
+
+scheduler 只改 store。
+
+---
+
+Ink。
+
+只吃：
+
+```tsx
+<App snapshot={store.get()}/>
+```
+
+---
+
+---
+
+作用：
+
+未来多agent。
+
+你不会变成：
+
+```txt
+12 hooks
+18 callbacks
+27 setState
+```
+
+地狱。
+
+---
+
+---
+
+## 4）Terminal Cleanup（必须）
+
+新增：
+
+`src/ui/terminal.ts`
+
+---
+
+setup()
+
+---
+
+```ts
+hideCursor()
+
+register(
+ SIGINT
+ SIGTERM
+ uncaughtException
+ exit
+)
+```
+
+---
+
+teardown()
+
+---
+
+```ts
+showCursor()
+
+resetAnsi()
+
+restoreRawMode()
+```
+
+---
+
+---
+
+**注意。**
+
+不要碰：
+
+```txt
+QuickEdit watchdog
+```
+
+第一阶段先不做。
+
+---
+
+先做稳定 cleanup。
+
+---
+
+---
+
+## 5）停止轮询 spinner（建议做）
+
+你现在：
+
+```txt
+500ms setInterval
+```
+
+持续制造UI事件。
+
+---
+
+改。
+
+---
+
+不要：
+
+```txt
+poll workingAgents
+```
+
+---
+
+改：
+
+**event driven。**
+
+---
+
+runtime already has：
+
+```txt
+onTaskSent()
+workingAgents.add()
+
+onReply()
+workingAgents.delete()
+```
+
+---
+
+利用它。
+
+---
+
+spinner只负责：
+
+```txt
+frame animation
+```
+
+不要负责：
+
+```txt
+recompute working state
+```
+
+---
+
+这样事件量直接砍半。
+
+---
+
+---
+
+# Phase 2（多Agent准备）
+
+等 Phase1 稳了再做。
+
+---
+
+## Event Bus
+
+新增：
+
+`src/core/events.ts`
+
+---
+
+推荐：
+
+`mitt`
+
+超轻。
+
+---
+
+事件：
+
+```ts
+agent.output
+agent.log
+agent.status
+agent.task.started
+agent.task.done
+ui.command
+```
+
+---
+
+未来。
+
+所有 agent。
+
+统一：
+
+```ts
+emit()
+```
+
+---
+
+禁止：
+
+```txt
+直接 setMessages
+直接 console.log
+```
+
+---
+
+---
+
+## Scheduler Priority
+
+支持：
+
+---
+
+HIGH
+
+```txt
+user input
+fatal errors
+```
+
+LOW
+
+```txt
+spinner
+usage
+heartbeat
+```
+
+---
+
+10 agent 时。
+
+仍然丝滑。
+
+---
+
+---
+
+# Phase 3（未来 20 Agent）
+
+不用现在做。
+
+但给你路线。
+
+---
+
+把：
+
+```txt
+HTTP localhost
+```
+
+升级：
+
+```txt
+inproc event transport
+```
+
+或
+
+```txt
+worker threads / IPC
+```
+
+---
+
+原因。
+
+20 agent。
+
+localhost fetch 开销开始明显。
+
+---
+
+但。
+
+**不是当前瓶颈。**
+
+别提前优化。
+
+---
+
+# 你项目里最关键的具体改动顺序
+
+按这个顺序做。
+
+不要乱。
+
+---
+
+## Day1
+
+### OutputGate
+
+先做。
+
+---
+
+验证：
+
+**Ink 模式下完全没有 console.log。**
+
+---
+
+---
+
+## Day1
+
+### Scheduler
+
+加。
+
+---
+
+验证：
+
+100ms 内。
+
+最多1次 UI commit。
+
+---
+
+---
+
+## Day1/2
+
+### Store
+
+接入。
+
+---
+
+验证：
+
+所有 UI 更新只走：
+
+```txt
+store.update
+↓
+scheduler
+↓
+single setState
+```
+
+---
+
+---
+
+## Day2
+
+### terminal cleanup
+
+接入。
+
+---
+
+验证：
+
+Ctrl+C后。
+
+cursor恢复。
+
+框选正常。
+
+---
+
+---
+
+## Day3
+
+压力测试。
+
+模拟：
+
+```txt
+10 agents
+50 events/sec
+```
+
+跑。
+
+---
+
+看：
+
+* 6h稳定性
+* Windows Terminal 框选
+* scroll lock
+* input latency
+
+---
+
+# 我给你的最终判断
+
+你系统不是“UI优化问题”。
+
+它已经是：
+
+> **异步多Agent终端runtime问题。**
+
+但。
+
+不用重写。
+
+不用删 Ink。
+
+---
+
+你的正确中量路线：
+
+```txt
+OutputGate
++
+Store
++
+Scheduler
++
+TerminalCleanup
+```
+
+这套非常适合 Purple 当前架构。
+
+而且能自然扩展到：
+
+> 10~20 agent + A2A + 24/7 Windows CLI runtime。

@@ -1,12 +1,27 @@
 import type { LLMProvider, LLMMessage, ToolDef, LLMResponse, ToolCall } from './types.js'
 
+function toApiMessages(messages: LLMMessage[]): Record<string, unknown>[] {
+  return messages.map(m => {
+    const msg: Record<string, unknown> = { role: m.role, content: m.content ?? null }
+    if (m.tool_call_id) msg.tool_call_id = m.tool_call_id
+    if (m.tool_calls) {
+      msg.tool_calls = m.tool_calls.map(tc => ({
+        id: tc.id,
+        type: 'function',
+        function: { name: tc.name, arguments: tc.arguments },
+      }))
+    }
+    return msg
+  })
+}
+
 export class OpenAIProvider implements LLMProvider {
   readonly name = 'openai'
 
   async generate(messages: LLMMessage[], apiKey: string, model: string, tools?: ToolDef[]): Promise<LLMResponse> {
     const body: Record<string, unknown> = {
       model: model || 'gpt-4o',
-      messages,
+      messages: toApiMessages(messages),
     }
     if (tools && tools.length > 0) {
       body.tools = tools.map(t => ({

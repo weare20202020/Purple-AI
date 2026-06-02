@@ -9,12 +9,14 @@ export interface ToolCall {
 export interface LLMMessage {
   role: Role
   content: string | null
+  reasoning_content?: string | null
   tool_call_id?: string
   tool_calls?: ToolCall[]
 }
 
 export interface LLMResponse {
   content: string | null
+  reasoning_content?: string | null
   toolCalls?: ToolCall[]
 }
 

@@ -1,6 +1,9 @@
 import * as readline from 'node:readline'
 import type { AgentManager } from '../agent/manager.js'
+import type { LogEntry } from '../types.js'
 import { BANNER } from '../ui/banner.js'
+import { outputGate } from './output-gate.js'
+import { setupTerminal } from '../ui/terminal.js'
 
 const DEEP  = '\x1b[38;2;123;79;181m'
 const LIGHT = '\x1b[38;2;196;175;240m'
@@ -14,6 +17,7 @@ const GRAD = [
   '\x1b[38;2;196;153;238m',
 ]
 const RST = '\x1b[0m'
+const DIM = '\x1b[38;2;107;91;123m'
 const P = DEEP
 const BP = LIGHT
 const W = (process.stdout.columns ?? 120) - 4
@@ -63,7 +67,7 @@ function renderStartup(manager: AgentManager): void {
   lines.push(blankB)
   lines.push(ln(`╚${'═'.repeat(W)}╝`))
   lines.push('')
-  console.log(lines.join('\n'))
+  outputGate.write(lines.join('\n') + '\n')
 }
 
 function sep(): string {
@@ -73,25 +77,19 @@ function sep(): string {
 function msgBox(label: string, text: string, color: string): string[] {
   const colorCode = color === LIGHT ? LIGHT : DEEP
   const lines = text.split('\n')
+  const INNER_W = W - 2
   const result: string[] = []
   result.push(`  ${colorCode}╭${'─'.repeat(W)}╮${RST}`)
   const first = `${colorCode}${label}${RST}: ${TEXT}${lines[0]}${RST}`
-  const firstPad = W - visibleLen(`${label}: `) - visibleLen(lines[0])
+  const firstPad = INNER_W - visibleLen(`${label}: `) - visibleLen(lines[0])
   result.push(`  ${colorCode}│${RST} ${first}${' '.repeat(Math.max(0, firstPad))} ${colorCode}│${RST}`)
   for (let i = 1; i < lines.length; i++) {
     const line = `${TEXT}${lines[i]}${RST}`
-    const pad = W - visibleLen(lines[i])
+    const pad = INNER_W - visibleLen(lines[i])
     result.push(`  ${colorCode}│${RST} ${line}${' '.repeat(Math.max(0, pad))} ${colorCode}│${RST}`)
   }
   result.push(`  ${colorCode}╰${'─'.repeat(W)}╯${RST}`)
   return result
-}
-
-function statusLine(manager: AgentManager): string {
-  const agent = manager.getActiveRuntime()
-  const name = agent?.profile.name ?? '?'
-  const usage = manager.getContextUsage()
-  return `  ${DEEP}●${RST} ${TEXT}${manager.providerName}${RST} ${DEEP}│${RST} ${TEXT}█ ${usage.pct}%${RST}`
 }
 
 export class ClassicREPL {
@@ -99,73 +97,145 @@ export class ClassicREPL {
   private manager: AgentManager
   private running = true
   private sessionShown = false
+  private verbose = false
 
-  constructor(manager: AgentManager) {
+  constructor(manager: AgentManager, options?: { verbose?: boolean }) {
     this.manager = manager
+    this.verbose = options?.verbose ?? false
     this.rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
       prompt: '',
     })
+    setupTerminal()
     manager.setOutputCallback((agentId, text) => {
       if (agentId === manager.getActiveId()) this.pushOutput(text)
+    })
+    manager.setLogCallback((agentId, entry) => {
+      if (agentId !== manager.getActiveId()) return
+      if (this.verbose) this.pushVerboseLog(entry)
+      else if (entry.type === 'send_delivered') {
+        const toName = String(entry.data.toName ?? entry.data.to ?? '?')
+        this.pushLogMessage(`${toName} 已确认收到消息`)
+      }
     })
   }
 
   async run(): Promise<void> {
     renderStartup(this.manager)
     const rt = this.manager.getActiveRuntime()!
-    console.log(`  ${LIGHT}✦${RST} ${rt.profile.name} (${rt.profile.role}) — ${rt.profile.expertise.join(', ')}\n`)
+    outputGate.write(`  ${LIGHT}✦${RST} ${rt.profile.name} (${rt.profile.role}) — ${rt.profile.expertise.join(', ')}\n\n`)
     this.showPrompt()
     this.rl.on('line', async (input) => {
       if (!this.running) return
       const t = input.trim()
-      console.log(sep())
-      console.log(statusLine(this.manager))
+      outputGate.write(sep() + '\n')
+      this.printStatusLine()
       if (t.startsWith('/')) await this.handleCommand(t)
       else if (t) await this.handleUserInput(t)
       if (this.running) this.showPrompt()
     })
   }
 
+  private spinnerChar(): string {
+    return '◌'
+  }
+
+  private printStatusLine(): void {
+    outputGate.write(this.buildStatusLine() + '\n')
+  }
+
+  private buildStatusLine(): string {
+    const allStatus = this.manager.getAllStatus()
+    const working = new Set(this.manager.getWorkingAgentIds())
+    const usage = this.manager.getContextUsage()
+    const parts: string[] = []
+    for (const s of allStatus) {
+      const isWorking = s.running && working.has(s.id)
+      const marker = !s.running ? `${P}○${RST}`
+        : isWorking ? `${LIGHT}${this.spinnerChar()}${RST}`
+        : `${P}●${RST}`
+      parts.push(`${marker} ${TEXT}${s.name}${RST}`)
+    }
+    const rt = this.manager.getActiveRuntime()
+    const thinking = rt?.isThinking ? ` ${LIGHT}${this.spinnerChar()} 思考中${RST}` : ''
+    return `  ${parts.join('  ')}${thinking} ${DEEP}│${RST} ${TEXT}${this.manager.providerName}${RST} ${DEEP}│${RST} ${TEXT}█ ${usage.pct}%${RST}`
+  }
+
   private showPrompt(): void {
     const name = this.manager.getActiveRuntime()?.profile.name ?? '?'
-    process.stdout.write(`  ${LIGHT}${name}${RST} ❯ ${TEXT}`)
+    outputGate.write(`  ${LIGHT}${name}${RST} ❯ ${TEXT}`)
   }
 
   private async handleUserInput(input: string): Promise<void> {
     const rt = this.manager.getActiveRuntime()
     if (!rt) return
 
-    // user message box (light purple)
     const userLines = msgBox('User', input, LIGHT)
-    console.log(userLines.join('\n'))
+    outputGate.write(userLines.join('\n') + '\n')
 
     const response = await rt.processUserInput(input)
 
-    // show session name after first exchange
     if (!this.sessionShown) {
       const sname = this.manager.getSessionName()
       if (sname) {
-        console.log(`  ${DEEP}SESSION${RST}${DEEP}:${RST} ${TEXT}${sname}${RST}`)
+        outputGate.write(`  ${DEEP}SESSION${RST}${DEEP}:${RST} ${TEXT}${sname}${RST}\n`)
       }
       this.sessionShown = true
     }
 
-    // agent message box (deep purple)
     const agentLines = msgBox(rt.profile.name, response, DEEP)
-    console.log(agentLines.join('\n'))
-
-    // status line shown before next prompt
+    outputGate.write(agentLines.join('\n') + '\n')
   }
 
   pushOutput(text: string): void {
-    console.log(`\n  ${TEXT}${text}${RST}\n`)
+    outputGate.write(`\n  ${TEXT}${text}${RST}\n`)
+    this.printStatusLine()
+  }
+
+  pushLogMessage(text: string): void {
+    outputGate.write(`\n  ${DEEP}系统${RST}: ${TEXT}${text}${RST}\n`)
+    this.printStatusLine()
+  }
+
+  pushVerboseLog(entry: LogEntry): void {
+    const ts = new Date(entry.timestamp).toISOString().slice(11, 19)
+    switch (entry.type) {
+      case 'tool_call': {
+        const name = String(entry.data.agentId ?? '?')
+        const tool = String(entry.data.tool ?? '?')
+        const args = entry.data.args ? JSON.stringify(entry.data.args).slice(0, 120) : '{}'
+        outputGate.write(`  ${DEEP}[${ts}]${RST} ${LIGHT}${name}${RST} → ${P}tool:${RST} ${TEXT}${tool}${RST} ${DIM}(${args})${RST}\n`)
+        break
+      }
+      case 'tool_result': {
+        const name = String(entry.data.agentId ?? '?')
+        const result = String(entry.data.result ?? '').slice(0, 200)
+        outputGate.write(`  ${DEEP}[${ts}]${RST} ${LIGHT}${name}${RST} ← ${P}result:${RST} ${TEXT}${result}${RST}\n`)
+        break
+      }
+      case 'agent_message': {
+        const from = String(entry.data.from ?? '?')
+        const to = String(entry.data.to ?? '?')
+        const content = String(entry.data.content ?? '').slice(0, 200)
+        const io = String(entry.data.io ?? '')
+        const dir = io === 'out' ? `${P}→${RST}` : `${P}←${RST}`
+        outputGate.write(`  ${DEEP}[${ts}]${RST} ${TEXT}${from}${RST} ${dir} ${TEXT}${to}${RST}: ${DIM}${content}${RST}\n`)
+        break
+      }
+      case 'send_delivered': {
+        const toName = String(entry.data.toName ?? entry.data.to ?? '?')
+        outputGate.write(`  ${DEEP}[${ts}]${RST} ${LIGHT}✓${RST} ${TEXT}${toName}${RST} ${DIM}已确认收到消息${RST}\n`)
+        break
+      }
+    }
+    this.printStatusLine()
   }
 
   stop(): void {
     this.running = false
     this.rl.close()
+    outputGate.close()
   }
 
   private async handleCommand(cmd: string): Promise<void> {
@@ -176,26 +246,26 @@ export class ClassicREPL {
     switch (command) {
       case '/quit':
       case '/exit':
-        console.log(`\n  ${LIGHT}Goodbye!${RST}\n`)
+        outputGate.write(`\n  ${LIGHT}Goodbye!${RST}\n`)
         this.stop(); process.exit(0)
         break
       case '/talk': {
-        if (!arg) { console.log(`\n  ${DEEP}Usage:${RST} /talk <agent_id>\n`); break }
+        if (!arg) { outputGate.write(`\n  ${DEEP}Usage:${RST} /talk <agent_id>\n`); break }
         try {
           await this.manager.switchAgent(arg.toUpperCase())
           const rt = this.manager.getActiveRuntime()!
-          console.log(`\n  ${LIGHT}✦${RST} Switched to ${LIGHT}${rt.profile.name}${RST}\n`)
-        } catch { console.log(`\n  ${DEEP}Unknown agent:${RST} ${arg}\n`) }
+          outputGate.write(`\n  ${LIGHT}✦${RST} Switched to ${LIGHT}${rt.profile.name}${RST}\n`)
+        } catch { outputGate.write(`\n  ${DEEP}Unknown agent:${RST} ${arg}\n`) }
         break
       }
       case '/agents': {
-        console.log()
+        outputGate.write('\n')
         for (const a of this.manager.getAllStatus()) {
           const s = a.running ? `${DEEP}●${RST} running` : '○ stopped'
           const act = a.active ? ` ${LIGHT}<-- active${RST}` : ''
-          console.log(`  ${DEEP}${a.id}${RST}  ${a.name.padEnd(10)} ${a.role.padEnd(14)} ${s}${act}`)
+          outputGate.write(`  ${DEEP}${a.id}${RST}  ${a.name.padEnd(10)} ${a.role.padEnd(14)} ${s}${act}\n`)
         }
-        console.log()
+        outputGate.write('\n')
         break
       }
       case '/new': {
@@ -207,36 +277,36 @@ export class ClassicREPL {
           const agentRole = parts[2]
           const expertise = parts.slice(3).join(' ').split(',').map(s => s.trim()).filter(Boolean)
           if (!agentName || !agentRole) {
-            console.log(`\n  ${DEEP}Usage:${RST} /new agent <name> <role> [expertise,...]\n`)
+            outputGate.write(`\n  ${DEEP}Usage:${RST} /new agent <name> <role> [expertise,...]\n`)
             break
           }
           try {
             const rt = await this.manager.createAgent(agentName, agentRole, expertise.length > 0 ? expertise : [agentRole])
-            console.log(`\n  ${LIGHT}✦${RST} Created and started agent "${rt.profile.name}" (${rt.profile.id}) on port ${rt.profile.port}\n`)
-          } catch (e: any) { console.log(`\n  ${DEEP}Error:${RST} ${e.message}\n`) }
+            outputGate.write(`\n  ${LIGHT}✦${RST} Created and started agent "${rt.profile.name}" (${rt.profile.id}) on port ${rt.profile.port}\n`)
+          } catch (e: any) { outputGate.write(`\n  ${DEEP}Error:${RST} ${e.message}\n`) }
           break
         }
 
         await this.manager.createNewSession()
         const rt = this.manager.getActiveRuntime()
-        console.log(`\n  ${LIGHT}✦${RST} New session started — ${rt?.profile.name} is ready.\n`)
+        outputGate.write(`\n  ${LIGHT}✦${RST} New session started — ${rt?.profile.name} is ready.\n`)
         break
       }
       case '/session': {
         if (!arg) {
           const sessions = this.manager.listSessions()
           if (sessions.length === 0) {
-            console.log(`\n  ${DEEP}No saved sessions.${RST}\n`)
+            outputGate.write(`\n  ${DEEP}No saved sessions.${RST}\n`)
             break
           }
-          console.log()
+          outputGate.write('\n')
           const rt = this.manager.getActiveRuntime()
           for (let i = 0; i < sessions.length; i++) {
             const s = sessions[i]
             const active = s.id === rt?.sessionId ? ` ${LIGHT}<-- active${RST}` : ''
-            console.log(`  ${DEEP}${i + 1}${RST}  ${s.name.padEnd(20)} ${s.messageCount.toString().padStart(3)} msgs  ${new Date(s.updatedAt).toLocaleString()}${active}`)
+            outputGate.write(`  ${DEEP}${i + 1}${RST}  ${s.name.padEnd(20)} ${s.messageCount.toString().padStart(3)} msgs  ${new Date(s.updatedAt).toLocaleString()}${active}\n`)
           }
-          console.log(`\n  ${LIGHT}/session <id>${RST} or ${LIGHT}/session <number>${RST} to switch\n`)
+          outputGate.write(`\n  ${LIGHT}/session <id>${RST} or ${LIGHT}/session <number>${RST} to switch\n`)
         } else {
           const sessions = this.manager.listSessions()
           const idx = parseInt(arg, 10)
@@ -246,37 +316,37 @@ export class ClassicREPL {
           }
           const exists = sessions.find(s => s.id === targetId)
           if (!exists) {
-            console.log(`\n  ${DEEP}Session not found:${RST} ${arg}\n`)
+            outputGate.write(`\n  ${DEEP}Session not found:${RST} ${arg}\n`)
             break
           }
           await this.manager.switchToSession(targetId)
-          console.log(`\n  ${LIGHT}✦${RST} Switched to session "${exists.name}"\n`)
+          outputGate.write(`\n  ${LIGHT}✦${RST} Switched to session "${exists.name}"\n`)
         }
         break
       }
       case '/start': {
-        if (!arg) { console.log(`\n  ${DEEP}Usage:${RST} /start <agent_id>\n`); break }
+        if (!arg) { outputGate.write(`\n  ${DEEP}Usage:${RST} /start <agent_id>\n`); break }
         try {
           const rt = await this.manager.startAgent(arg.toUpperCase())
-          console.log(`\n  ${LIGHT}✦${RST} Started ${LIGHT}${rt.profile.name}${RST}\n`)
-        } catch { console.log(`\n  ${DEEP}Unknown agent:${RST} ${arg}\n`) }
+          outputGate.write(`\n  ${LIGHT}✦${RST} Started ${LIGHT}${rt.profile.name}${RST}\n`)
+        } catch { outputGate.write(`\n  ${DEEP}Unknown agent:${RST} ${arg}\n`) }
         break
       }
       case '/default': {
-        if (!arg) { console.log(`\n  ${DEEP}Default:${RST} ${this.manager.defaultId}\n`); break }
+        if (!arg) { outputGate.write(`\n  ${DEEP}Default:${RST} ${this.manager.defaultId}\n`); break }
         const id = arg.toUpperCase()
-        if (!this.manager.getAllStatus().find(a => a.id === id)) { console.log(`\n  ${DEEP}Unknown:${RST} ${id}\n`); break }
+        if (!this.manager.getAllStatus().find(a => a.id === id)) { outputGate.write(`\n  ${DEEP}Unknown:${RST} ${id}\n`); break }
         this.manager.defaultId = id
-        console.log(`\n  ${DEEP}Default set to${RST} ${LIGHT}${id}${RST}\n`)
+        outputGate.write(`\n  ${DEEP}Default set to${RST} ${LIGHT}${id}${RST}\n`)
         break
       }
       case '/help':
-        console.log(`\n  ${LIGHT}/talk <id>${RST}          Switch agent\n  ${LIGHT}/agents${RST}             List agents\n  ${LIGHT}/new${RST}                 New session\n  ${LIGHT}/new agent <n> <r>${RST}   Create & start a new agent\n  ${LIGHT}/session [id]${RST}         List / switch session\n  ${LIGHT}/default <id>${RST}       Set default agent\n  ${LIGHT}/start <id>${RST}         Start agent\n  ${LIGHT}/status${RST}             Session info\n  ${LIGHT}/index${RST}              Rebuild file index\n  ${LIGHT}/help${RST}               This help\n  ${LIGHT}/quit${RST}               Exit\n`)
+        outputGate.write(`\n  ${LIGHT}/talk <id>${RST}          Switch agent\n  ${LIGHT}/agents${RST}             List agents\n  ${LIGHT}/new${RST}                 New session\n  ${LIGHT}/new agent <n> <r>${RST}   Create & start a new agent\n  ${LIGHT}/session [id]${RST}         List / switch session\n  ${LIGHT}/default <id>${RST}       Set default agent\n  ${LIGHT}/start <id>${RST}         Start agent\n  ${LIGHT}/status${RST}             Session info\n  ${LIGHT}/index${RST}              Rebuild file index\n  ${LIGHT}/help${RST}               This help\n  ${LIGHT}/quit${RST}               Exit\n`)
         break
       case '/status': {
         const rt = this.manager.getActiveRuntime()
         const usage = this.manager.getContextUsage()
-        console.log(`\n  ${DEEP}Active:${RST} ${LIGHT}${rt?.profile.name}${RST} (${rt?.profile.id})\n  ${DEEP}Model:${RST} ${this.manager.providerName}\n  ${DEEP}Context:${RST} ${TEXT}${usage.used} / ${usage.limit} (${usage.pct}%)${RST}\n`)
+        outputGate.write(`\n  ${DEEP}Active:${RST} ${LIGHT}${rt?.profile.name}${RST} (${rt?.profile.id})\n  ${DEEP}Model:${RST} ${this.manager.providerName}\n  ${DEEP}Context:${RST} ${TEXT}${usage.used} / ${usage.limit} (${usage.pct}%)${RST}\n`)
         break
       }
       case '/index': {
@@ -285,12 +355,12 @@ export class ClassicREPL {
         try {
           const { buildPageIndex } = await import('../memory/page-index.js')
           const entries = await buildPageIndex(rt.workspace)
-          console.log(`\n  ${LIGHT}✦${RST} Indexed ${entries.length} files\n`)
-        } catch (e: any) { console.log(`\n  ${DEEP}Error:${RST} ${e.message}\n`) }
+          outputGate.write(`\n  ${LIGHT}✦${RST} Indexed ${entries.length} files\n`)
+        } catch (e: any) { outputGate.write(`\n  ${DEEP}Error:${RST} ${e.message}\n`) }
         break
       }
       default:
-        console.log(`\n  ${DEEP}Unknown:${RST} ${command}. Type ${LIGHT}/help${RST}\n`)
+        outputGate.write(`\n  ${DEEP}Unknown:${RST} ${command}. Type ${LIGHT}/help${RST}\n`)
     }
   }
 }

@@ -4,6 +4,7 @@ import { registerProvider } from '../llm/registry.js'
 import { OpenAIProvider } from '../llm/openai.js'
 import { DeepSeekProvider } from '../llm/deepseek.js'
 import { AnthropicProvider } from '../llm/anthropic.js'
+import type { LogEntry } from '../types.js'
 import path from 'node:path'
 import process from 'node:process'
 
@@ -25,6 +26,8 @@ export class AgentManager {
   private activeId: string
   private _defaultId: string
   private _outputCallback: ((agentId: string, text: string) => void) | null = null
+  private _logCallback: ((agentId: string, entry: LogEntry) => void) | null = null
+  private _workingUpdateCallback: ((working: string[]) => void) | null = null
 
   constructor(defaultId: string) {
     this.activeId = defaultId
@@ -36,6 +39,14 @@ export class AgentManager {
 
   setOutputCallback(cb: (agentId: string, text: string) => void): void {
     this._outputCallback = cb
+  }
+
+  setLogCallback(cb: (agentId: string, entry: LogEntry) => void): void {
+    this._logCallback = cb
+  }
+
+  setOnWorkingUpdate(cb: (working: string[]) => void): void {
+    this._workingUpdateCallback = cb
   }
 
   async startAgent(id: string): Promise<AgentRuntime> {
@@ -59,7 +70,14 @@ export class AgentManager {
       this._outputCallback?.(id, text)
     }
 
+    runtime.onLog = (entry) => {
+      this._logCallback?.(id, entry)
+    }
+
     runtime.manager = this
+    runtime.onWorkingUpdate = (_ids) => {
+      this._workingUpdateCallback?.(this.getWorkingAgentIds())
+    }
 
     await runtime.start()
     this.agents.set(id, runtime)
@@ -87,6 +105,16 @@ export class AgentManager {
       running: this.agents.has(a.id),
       active: a.id === this.activeId,
     }))
+  }
+
+  getWorkingAgentIds(): string[] {
+    const ids = new Set<string>()
+    for (const rt of this.agents.values()) {
+      for (const w of rt.getWorkingAgents()) {
+        ids.add(w)
+      }
+    }
+    return Array.from(ids)
   }
 
   async switchAgent(id: string): Promise<AgentRuntime> {

@@ -17,3 +17,9 @@ export interface AgentProfile {
   role: string
   port: number
 }
+
+export interface LogEntry {
+  type: 'send_delivered' | 'tool_call' | 'tool_result' | 'agent_message' | 'agent_status'
+  timestamp: number
+  data: Record<string, unknown>
+}
