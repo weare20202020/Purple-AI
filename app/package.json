@@ -1,6 +1,6 @@
 {
   "name": "purple-ai",
-  "version": "0.1.0",
+  "version": "1.8.0",
   "description": "轻量、纯终端 CLI 优先、可完全本地运行的多 Agent 协作框架",
   "type": "module",
   "bin": {

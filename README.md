@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.1.0-8b5cf6?style=for-the-badge" alt="version">
+  <img src="https://img.shields.io/badge/version-1.8-8b5cf6?style=for-the-badge" alt="version">
   <img src="https://img.shields.io/badge/TypeScript-5.8-3178c6?style=for-the-badge&logo=typescript" alt="typescript">
   <img src="https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge" alt="license">
   <img src="https://img.shields.io/badge/Node.js-22+-339933?style=for-the-badge&logo=node.js" alt="node">
@@ -11,7 +11,14 @@
   <img src="https://img.shields.io/badge/PR-欢迎-3b82f6?style=flat-square" alt="prs">
 </p>
 
-<h1 align="center">✦ Purple AI ✦</h1>
+<pre align="center">
+██████╗  ██╗   ██╗ ██████╗  ██████╗  ██║      ███████╗
+██╔══██╗ ██║   ██║ ██╔══██╗ ██╔══██╗ ██║      ██╔════╝
+██████╔╝ ██║   ██║ ██████╔╝ ██████╔╝ ██║      ███████╗
+██╔═══╝  ██║   ██║ ██╔══██╗ ██╔═══╝  ██║      ██║     
+██║      ╚██████╔╝ ██║  ██║ ██║      ███████╗ ███████║
+╚═╝       ╚═════╝  ╚═╝  ╚═╝ ╚═╝      ╚══════╝ ╚══════╝
+</pre>
 
 <p align="center">
   <strong>轻量 · CLI 优先 · 可完全本地运行的多 Agent 协作框架</strong>
